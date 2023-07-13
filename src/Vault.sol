@@ -6,9 +6,12 @@ import "@eas-contracts/IEAS.sol";
 import "@eas-contracts/ISchemaRegistry.sol";
 import "@eas-contracts/resolver/SchemaResolver.sol";
 
-contract Pool is SchemaResolver {
+import "forge-std/Test.sol";
+
+contract Vault is SchemaResolver, Test {
     ISchemaRegistry private immutable _registry;
-    address private immutable _deployer;
+
+    bytes32 public poolSchema;
 
     bytes32 public inviteSchema;
     bytes32 public blockSchema;
@@ -25,16 +28,16 @@ contract Pool is SchemaResolver {
     // Will try to find a simpler way to do it.
     bool private _reasonProvided = false;
 
-    // List of attestations preventing an address from using the vault.
-    mapping(address => bytes32[]) public blocks;
-    mapping(address => bytes32[]) public invites;
+    mapping(bytes32 => uint256) public balance;
+    mapping(bytes32 => mapping(address => bytes32[])) public blocks;
+    mapping(bytes32 => mapping(address => bytes32[])) public invites;
 
-    function isBlocked(address addr) public view returns (bool) {
-        return blocks[addr].length != 0;
+    function isBlocked(bytes32 pool, address addr) public view returns (bool) {
+        return blocks[pool][addr].length != 0;
     }
 
-    function isInvited(address addr) public view returns (bool) {
-        return invites[addr].length >= 1;
+    function isInvited(bytes32 pool, address addr) public view returns (bool) {
+        return invites[pool][addr].length >= 1;
     }
 
     function isPayable() public pure override returns (bool) {
@@ -43,10 +46,15 @@ contract Pool is SchemaResolver {
 
     constructor(IEAS eas, bytes32 revokeReasonSchema) SchemaResolver(eas) {
         _registry = _eas.getSchemaRegistry();
-        _deployer = msg.sender;
+
+        poolSchema = _registry.register(
+            "string name, string description, string creatorName",
+            this,
+            false
+        );
         // Recipient is the invited address.
         inviteSchema = _registry.register(
-            "string alias, string inviteReason",
+            "string name, string inviteReason",
             this,
             true
         );
@@ -62,47 +70,56 @@ contract Pool is SchemaResolver {
         revokeSchema = revokeReasonSchema;
     }
 
-    function inviteDeployer(string calldata name) external {
-        require(
-            !isInvited(_deployer) && !isBlocked(_deployer),
-            "Deployer is already invited or blocked."
-        );
-        AttestationRequest memory request = AttestationRequest({
-            schema: inviteSchema,
-            data: AttestationRequestData({
-                recipient: _deployer,
-                expirationTime: 0,
-                revocable: true,
-                refUID: bytes32(0),
-                data: abi.encode(name, "Inviting contract deployer."),
-                value: 0
-            })
-        });
-        bytes32 uid = _eas.attest(request);
-        invites[msg.sender].push(uid);
-    }
-
     function onAttest(
         Attestation calldata attestation,
-        uint256
+        uint256 value
     ) internal override returns (bool) {
-        if (attestation.attester == address(this)) return true;
+        if (attestation.schema == poolSchema) {
+            (, , string memory creatorName) = abi.decode(
+                attestation.data,
+                (string, string, string)
+            );
+
+            AttestationRequest memory request = AttestationRequest({
+                schema: inviteSchema,
+                data: AttestationRequestData({
+                    recipient: attestation.attester,
+                    expirationTime: 0,
+                    revocable: true,
+                    refUID: attestation.uid,
+                    data: abi.encode(creatorName, "Inviting pool creator."),
+                    value: 0
+                })
+            });
+            if (_eas.attest(request) != 0) return true;
+            return false;
+        }
+
+        bytes32 pool = attestation.refUID;
+        if (pool == bytes32(0)) return false;
 
         if (attestation.schema == depositSchema) {
+            if (value == 0) return false;
+            balance[pool] += value;
             return true;
         }
 
-        if (isBlocked(attestation.attester)) return false;
-        if (!isInvited(attestation.attester)) return false;
+        if (
+            (isBlocked(pool, attestation.attester) ||
+                !isInvited(pool, attestation.attester)) &&
+            attestation.attester != address(this)
+        ) {
+            return false;
+        }
 
         if (attestation.schema == inviteSchema) {
             if (attestation.recipient == address(0)) return false;
             if (attestation.recipient == attestation.attester) return false;
-            invites[attestation.recipient].push(attestation.uid);
+            invites[pool][attestation.recipient].push(attestation.uid);
             return true;
         }
         if (attestation.schema == blockSchema) {
-            blocks[attestation.recipient].push(attestation.uid);
+            blocks[pool][attestation.recipient].push(attestation.uid);
             return true;
         }
         if (attestation.schema == transferSchema) {
@@ -111,7 +128,8 @@ contract Pool is SchemaResolver {
             string memory reason;
             (amount, reason) = abi.decode(attestation.data, (uint256, string));
 
-            if (amount > address(this).balance || amount == 0) return false;
+            if (amount > balance[pool] || amount == 0) return false;
+            balance[pool] -= amount;
             (bool sent, ) = attestation.recipient.call{value: amount}("");
             if (!sent) return false;
             return true;
@@ -153,12 +171,13 @@ contract Pool is SchemaResolver {
         // Only accept revocations from revokeWithReason().
         if (!_reasonProvided) return false;
 
-        if (isBlocked(attestation.attester)) return false;
-        if (!isInvited(attestation.attester)) return false;
+        bytes32 pool = attestation.refUID;
+        if (isBlocked(pool, attestation.attester)) return false;
+        if (!isInvited(pool, attestation.attester)) return false;
 
         if (attestation.schema == inviteSchema) {
             // Remove revoked invitation from the invites list.
-            bytes32[] storage array = invites[attestation.recipient];
+            bytes32[] storage array = invites[pool][attestation.recipient];
             for (uint i = 0; i < array.length; i++) {
                 if (array[i] == attestation.uid) {
                     array[i] = array[array.length - 1];
@@ -170,7 +189,7 @@ contract Pool is SchemaResolver {
         }
         if (attestation.schema == blockSchema) {
             // Remove revoked block from the blocks list.
-            bytes32[] storage array = blocks[attestation.recipient];
+            bytes32[] storage array = blocks[pool][attestation.recipient];
             for (uint i = 0; i < array.length; i++) {
                 if (array[i] == attestation.uid) {
                     array[i] = array[array.length - 1];
@@ -184,10 +203,10 @@ contract Pool is SchemaResolver {
     }
 
     // Remove expired attestations from the invites and blocks list of addr.
-    function updateExpired(address addr) external {
+    function updateExpired(bytes32 pool, address addr) external {
         Attestation memory attestation;
         uint64 time = uint64(block.timestamp);
-        bytes32[] storage array = invites[addr];
+        bytes32[] storage array = invites[pool][addr];
 
         for (uint i = 0; i < array.length; i++) {
             attestation = _eas.getAttestation(array[i]);
@@ -196,7 +215,7 @@ contract Pool is SchemaResolver {
                 array.pop();
             }
         }
-        array = blocks[addr];
+        array = blocks[pool][addr];
         for (uint i = 0; i < array.length; i++) {
             attestation = _eas.getAttestation(array[i]);
             if (attestation.expirationTime < time) {

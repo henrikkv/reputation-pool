@@ -10,16 +10,20 @@ import "@eas-contracts/Common.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
-import "src/Pool.sol";
+import "src/Vault.sol";
 
-contract PoolTest is Test {
+contract VaultTest is Test {
     ISchemaRegistry public registry;
     IEAS public eas;
-    Pool public pool;
+    Vault public vault;
 
     bytes32 easDomainSeparator;
 
     bytes32 revokeSchema;
+
+    bytes32 poolSchema;
+    bytes32 pool;
+
     bytes32 inviteSchema;
     bytes32 blockSchema;
     bytes32 depositSchema;
@@ -55,19 +59,32 @@ contract PoolTest is Test {
             false
         );
         vm.prank(alice);
-        pool = new Pool(eas, revokeSchema);
-        vm.prank(alice);
-        pool.inviteDeployer("Alice");
+        vault = new Vault(eas, revokeSchema);
 
-        inviteSchema = pool.inviteSchema();
-        blockSchema = pool.blockSchema();
-        depositSchema = pool.depositSchema();
-        transferSchema = pool.transferSchema();
+        poolSchema = vault.poolSchema();
+        inviteSchema = vault.inviteSchema();
+        blockSchema = vault.blockSchema();
+        depositSchema = vault.depositSchema();
+        transferSchema = vault.transferSchema();
+
+        AttestationRequest memory request = AttestationRequest({
+            schema: poolSchema,
+            data: AttestationRequestData({
+                recipient: alice,
+                expirationTime: 0,
+                revocable: false,
+                refUID: 0,
+                data: abi.encode("testPool", "The testing pool", "Alice"),
+                value: 0
+            })
+        });
+        vm.prank(alice);
+        pool = eas.attest(request);
     }
 
     function testOwnerIsInvitedAndNotBlocked() public view {
-        require(pool.isInvited(alice));
-        require(!pool.isBlocked(alice));
+        require(vault.isInvited(pool, alice));
+        require(!vault.isBlocked(pool, alice));
     }
 
     function testInvite() public {
@@ -77,7 +94,7 @@ contract PoolTest is Test {
                 recipient: bob,
                 expirationTime: 0,
                 revocable: true,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode("Bob", "Inviting Bob to test the contracts."),
                 value: 0
             })
@@ -86,7 +103,7 @@ contract PoolTest is Test {
         eas.attest(request);
         vm.stopPrank();
 
-        require(pool.isInvited(bob));
+        require(vault.isInvited(pool, bob));
     }
 
     function testInviteAndRevoke() public {
@@ -96,7 +113,7 @@ contract PoolTest is Test {
                 recipient: bob,
                 expirationTime: 0,
                 revocable: true,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode("Bob", "Inviting Bob to test the contracts."),
                 value: 0
             })
@@ -104,7 +121,7 @@ contract PoolTest is Test {
         vm.startPrank(alice);
         bytes32 uid = eas.attest(inviteBob);
         vm.stopPrank();
-        require(pool.isInvited(bob));
+        require(vault.isInvited(pool, bob));
 
         AttestationRequest memory inviteCharlie = AttestationRequest({
             schema: inviteSchema,
@@ -112,7 +129,7 @@ contract PoolTest is Test {
                 recipient: charlie,
                 expirationTime: 0,
                 revocable: true,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode(
                     "Charlie",
                     "Inviting Charlie to test the contracts."
@@ -123,7 +140,7 @@ contract PoolTest is Test {
         vm.startPrank(bob);
         eas.attest(inviteCharlie);
         vm.stopPrank();
-        require(pool.isInvited(charlie));
+        require(vault.isInvited(pool, charlie));
 
         DelegatedRevocationRequest
             memory revokeRequest = DelegatedRevocationRequest({
@@ -134,16 +151,19 @@ contract PoolTest is Test {
             });
         revokeRequest = signDelegatedRevocationRequest(revokeRequest, 1);
         vm.startPrank(alice);
-        pool.revokeWithReason(
+        vault.revokeWithReason(
             revokeRequest,
             "Revoking Bobs invitation to test the contract."
         );
         vm.stopPrank();
         require(
-            !pool.isInvited(bob),
+            !vault.isInvited(pool, bob),
             "Bob is invited after invitation was revoked."
         );
-        require(pool.isInvited(charlie), "Charlie uninvited before update.");
+        require(
+            vault.isInvited(pool, charlie),
+            "Charlie uninvited before update."
+        );
 
         AttestationRequest memory reInviteBob = AttestationRequest({
             schema: inviteSchema,
@@ -151,7 +171,7 @@ contract PoolTest is Test {
                 recipient: bob,
                 expirationTime: 0,
                 revocable: true,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode(
                     "Bob-2.0",
                     "Reinviting Bob to test the contracts."
@@ -162,7 +182,7 @@ contract PoolTest is Test {
         vm.startPrank(alice);
         eas.attest(reInviteBob);
         vm.stopPrank();
-        require(pool.isInvited(bob), "Bob could not be invited again.");
+        require(vault.isInvited(pool, bob), "Bob could not be invited again.");
     }
 
     function testBlockAndRevoke() public {
@@ -172,7 +192,7 @@ contract PoolTest is Test {
                 recipient: bob,
                 expirationTime: 0,
                 revocable: true,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode("Bob", "Inviting bob to test the contracts."),
                 value: 0
             })
@@ -187,7 +207,7 @@ contract PoolTest is Test {
                 recipient: bob,
                 expirationTime: 0,
                 revocable: true,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode("Blocking Bob."),
                 value: 0
             })
@@ -195,7 +215,7 @@ contract PoolTest is Test {
         vm.startPrank(alice);
         bytes32 uid = eas.attest(blockRequest);
         vm.stopPrank();
-        require(pool.isBlocked(bob), "Bob should be blocked.");
+        require(vault.isBlocked(pool, bob), "Bob should be blocked.");
 
         DelegatedRevocationRequest
             memory revokeRequest = DelegatedRevocationRequest({
@@ -206,9 +226,9 @@ contract PoolTest is Test {
             });
         revokeRequest = signDelegatedRevocationRequest(revokeRequest, 1);
         vm.startPrank(alice);
-        pool.revokeWithReason(revokeRequest, "Unblocking Bob.");
+        vault.revokeWithReason(revokeRequest, "Unblocking Bob.");
         vm.stopPrank();
-        require(!pool.isBlocked(bob), "Bob should be unblocked.");
+        require(!vault.isBlocked(pool, bob), "Bob should be unblocked.");
     }
 
     function testInvitationExpired() public {
@@ -218,7 +238,7 @@ contract PoolTest is Test {
                 recipient: bob,
                 expirationTime: uint64(block.timestamp) + 1000,
                 revocable: true,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode(
                     "Bob",
                     "Inviting bob to test expiration of invitations."
@@ -229,16 +249,16 @@ contract PoolTest is Test {
         vm.startPrank(alice);
         eas.attest(request);
         vm.stopPrank();
-        require(pool.isInvited(bob), "Bob should be invited");
+        require(vault.isInvited(pool, bob), "Bob should be invited");
 
-        pool.updateExpired(bob);
-        require(pool.isInvited(bob), "Bob should be invited");
+        vault.updateExpired(pool, bob);
+        require(vault.isInvited(pool, bob), "Bob should be invited");
 
         skip(1001);
-        require(pool.isInvited(bob), "Bob should be invited");
+        require(vault.isInvited(pool, bob), "Bob should be invited");
 
-        pool.updateExpired(bob);
-        require(!pool.isInvited(bob), "Bob should not be invited");
+        vault.updateExpired(pool, bob);
+        require(!vault.isInvited(pool, bob), "Bob should not be invited");
     }
 
     function testBlockExpired() public {
@@ -248,7 +268,7 @@ contract PoolTest is Test {
                 recipient: bob,
                 expirationTime: uint64(block.timestamp) + 1000,
                 revocable: true,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode(
                     "Bob",
                     "Inviting bob to test expiration of block attestation."
@@ -259,10 +279,10 @@ contract PoolTest is Test {
         vm.startPrank(alice);
         eas.attest(request);
         vm.stopPrank();
-        require(pool.isInvited(bob), "Bob should be invited");
+        require(vault.isInvited(pool, bob), "Bob should be invited");
 
-        pool.updateExpired(bob);
-        require(pool.isInvited(bob), "Bob should be invited");
+        vault.updateExpired(pool, bob);
+        require(vault.isInvited(pool, bob), "Bob should be invited");
 
         AttestationRequest memory blockRequest = AttestationRequest({
             schema: blockSchema,
@@ -270,7 +290,7 @@ contract PoolTest is Test {
                 recipient: bob,
                 expirationTime: uint64(block.timestamp) + 500,
                 revocable: true,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode("Blocking Bob."),
                 value: 0
             })
@@ -278,20 +298,20 @@ contract PoolTest is Test {
         vm.startPrank(alice);
         eas.attest(blockRequest);
         vm.stopPrank();
-        require(pool.isBlocked(bob), "Bob should be blocked.");
+        require(vault.isBlocked(pool, bob), "Bob should be blocked.");
 
         skip(501);
-        require(pool.isBlocked(bob), "Bob should be blocked.");
+        require(vault.isBlocked(pool, bob), "Bob should be blocked.");
 
-        pool.updateExpired(bob);
-        require(!pool.isBlocked(bob), "Bob should not be blocked.");
-        require(pool.isInvited(bob), "Bob should be invited.");
+        vault.updateExpired(pool, bob);
+        require(!vault.isBlocked(pool, bob), "Bob should not be blocked.");
+        require(vault.isInvited(pool, bob), "Bob should be invited.");
 
         skip(500);
-        require(pool.isInvited(bob), "Bob should be invited");
+        require(vault.isInvited(pool, bob), "Bob should be invited");
 
-        pool.updateExpired(bob);
-        require(!pool.isInvited(bob), "Bob should not be invited");
+        vault.updateExpired(pool, bob);
+        require(!vault.isInvited(pool, bob), "Bob should not be invited");
     }
 
     function testFailInviteSelf() public {
@@ -301,7 +321,7 @@ contract PoolTest is Test {
                 recipient: alice,
                 expirationTime: 0,
                 revocable: true,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode(
                     "Alice",
                     "Inviting myself to test the contracts."
@@ -321,7 +341,7 @@ contract PoolTest is Test {
                 recipient: alice,
                 expirationTime: 0,
                 revocable: true,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode("Blocking myself to test the contracts."),
                 value: 0
             })
@@ -329,7 +349,7 @@ contract PoolTest is Test {
         vm.startPrank(alice);
         bytes32 uid = eas.attest(request);
         vm.stopPrank();
-        require(pool.isBlocked(alice), "Alice should be blocked");
+        require(vault.isBlocked(pool, alice), "Alice should be blocked");
 
         DelegatedRevocationRequest
             memory revokeRequest = DelegatedRevocationRequest({
@@ -341,7 +361,7 @@ contract PoolTest is Test {
         revokeRequest = signDelegatedRevocationRequest(revokeRequest, 1);
         vm.startPrank(alice);
         vm.expectRevert();
-        pool.revokeWithReason(revokeRequest, "Revoking blocking myself.");
+        vault.revokeWithReason(revokeRequest, "Revoking blocking myself.");
         vm.stopPrank();
     }
 
@@ -352,27 +372,27 @@ contract PoolTest is Test {
                 recipient: address(0),
                 expirationTime: 0,
                 revocable: false,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode("Testing deposits from invited people."),
                 value: 1 ether
             })
         });
         vm.prank(alice);
         eas.attest{value: 1 ether}(request);
-        require(address(pool).balance == 1 ether);
+        require(address(vault).balance == 1 ether);
         vm.prank(alice);
         eas.attest{value: 1 ether}(request);
-        require(address(pool).balance == 2 ether);
+        require(address(vault).balance == 2 ether);
 
         request.data.data = abi.encode(
             "Testing deposits from not invited people."
         );
         vm.prank(bob);
         eas.attest{value: 1 ether}(request);
-        require(address(pool).balance == 3 ether);
+        require(address(vault).balance == 3 ether);
         vm.prank(bob);
         eas.attest{value: 1 ether}(request);
-        require(address(pool).balance == 4 ether);
+        require(address(vault).balance == 4 ether);
     }
 
     function testTransfer() public {
@@ -382,7 +402,7 @@ contract PoolTest is Test {
                 recipient: address(0),
                 expirationTime: 0,
                 revocable: false,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode("Testing deposits from invited people."),
                 value: 1 ether
             })
@@ -396,7 +416,7 @@ contract PoolTest is Test {
                 recipient: alice,
                 expirationTime: 0,
                 revocable: false,
-                refUID: bytes32(0),
+                refUID: pool,
                 data: abi.encode(
                     uint256(0.1 ether),
                     "Testing transfer from the contract to alice"
