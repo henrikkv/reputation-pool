@@ -15,22 +15,18 @@ contract Vault is SchemaResolver, Test {
 
     bytes32 public inviteSchema;
     bytes32 public blockSchema;
+    bytes32 public revokeReasonSchema;
     bytes32 public depositSchema;
     bytes32 public transferSchema;
 
-    // Reason for revocation.
-    // refUID is the attestation to revoke.
-    bytes32 public revokeSchema;
-    // Sepolia: 0x9c26326e71005038f39f00d945c1da6077f4d9b77634221654a03a4477340598;
-
-    // Used to ensure an attestation to revokeSchema is made for every revocation.
-    // I could not find a way to do it in a single transaction without using a delegated revocation.
-    // Will try to find a simpler way to do it.
-    bool private _reasonProvided = false;
-
+    // Balance for each pool.
     mapping(bytes32 => uint256) public balance;
+    // Blocks for each user for each pool.
     mapping(bytes32 => mapping(address => bytes32[])) public blocks;
+    // Invites fro each user for each pool.
     mapping(bytes32 => mapping(address => bytes32[])) public invites;
+
+    mapping(bytes32 => bool) public hasRevokeReason;
 
     function isBlocked(bytes32 pool, address addr) public view returns (bool) {
         return blocks[pool][addr].length != 0;
@@ -44,7 +40,7 @@ contract Vault is SchemaResolver, Test {
         return true;
     }
 
-    constructor(IEAS eas, bytes32 revokeReasonSchema) SchemaResolver(eas) {
+    constructor(IEAS eas) SchemaResolver(eas) {
         _registry = _eas.getSchemaRegistry();
 
         poolSchema = _registry.register(
@@ -60,6 +56,12 @@ contract Vault is SchemaResolver, Test {
         );
         // Recipient is the blocked address.
         blockSchema = _registry.register("string blockReason", this, true);
+        // RefUID is attestation to revoke.
+        revokeReasonSchema = _registry.register(
+            "string revokeReason",
+            this,
+            false
+        );
         depositSchema = _registry.register("string depositReason", this, false);
         // Recipient is the address to transfer to.
         transferSchema = _registry.register(
@@ -67,7 +69,6 @@ contract Vault is SchemaResolver, Test {
             this,
             false
         );
-        revokeSchema = revokeReasonSchema;
     }
 
     function onAttest(
@@ -103,13 +104,26 @@ contract Vault is SchemaResolver, Test {
             balance[pool] += value;
             return true;
         }
+        // Schemas below are not payable.
+        if (value != 0) return false;
 
+        if (attestation.schema == revokeReasonSchema) {
+            Attestation memory toRevoke = _eas.getAttestation(
+                attestation.refUID
+            );
+            if (
+                attestation.attester != toRevoke.attester || !toRevoke.revocable
+            ) return false;
+            hasRevokeReason[toRevoke.uid] = true;
+            return true;
+        }
+
+        // Only allow attestations from this contract or invited and not blocked addresses.
         if (
             (isBlocked(pool, attestation.attester) ||
-                !isInvited(pool, attestation.attester)) &&
-            attestation.attester != address(this)
+                !isInvited(pool, attestation.attester))
         ) {
-            return false;
+            if (attestation.attester != address(this)) return false;
         }
 
         if (attestation.schema == inviteSchema) {
@@ -137,39 +151,11 @@ contract Vault is SchemaResolver, Test {
         return false;
     }
 
-    function revokeWithReason(
-        DelegatedRevocationRequest calldata revocation,
-        string calldata reason
-    ) external {
-        _reasonProvided = true;
-        _eas.revokeByDelegation(revocation);
-        _reasonProvided = false;
-
-        Attestation memory attestation = _eas.getAttestation(
-            revocation.data.uid
-        );
-        AttestationRequest memory request = AttestationRequest({
-            schema: revokeSchema,
-            data: AttestationRequestData({
-                recipient: address(0),
-                expirationTime: 0,
-                revocable: false,
-                refUID: attestation.uid,
-                data: abi.encode(reason),
-                value: 0
-            })
-        });
-        _eas.attest(request);
-
-        return;
-    }
-
     function onRevoke(
         Attestation calldata attestation,
         uint256
     ) internal override returns (bool) {
-        // Only accept revocations from revokeWithReason().
-        if (!_reasonProvided) return false;
+        if (!hasRevokeReason[attestation.uid]) return false;
 
         bytes32 pool = attestation.refUID;
         if (isBlocked(pool, attestation.attester)) return false;

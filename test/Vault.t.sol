@@ -19,13 +19,12 @@ contract VaultTest is Test {
 
     bytes32 easDomainSeparator;
 
-    bytes32 revokeSchema;
-
     bytes32 poolSchema;
     bytes32 pool;
 
     bytes32 inviteSchema;
     bytes32 blockSchema;
+    bytes32 revokeReasonSchema;
     bytes32 depositSchema;
     bytes32 transferSchema;
 
@@ -53,17 +52,13 @@ contract VaultTest is Test {
         eas = new EAS(registry);
         easDomainSeparator = EIP712Verifier(address(eas)).getDomainSeparator();
 
-        revokeSchema = registry.register(
-            "string reason",
-            ISchemaResolver(address(0)),
-            false
-        );
         vm.prank(alice);
-        vault = new Vault(eas, revokeSchema);
+        vault = new Vault(eas);
 
         poolSchema = vault.poolSchema();
         inviteSchema = vault.inviteSchema();
         blockSchema = vault.blockSchema();
+        revokeReasonSchema = vault.revokeReasonSchema();
         depositSchema = vault.depositSchema();
         transferSchema = vault.transferSchema();
 
@@ -142,20 +137,27 @@ contract VaultTest is Test {
         vm.stopPrank();
         require(vault.isInvited(pool, charlie));
 
-        DelegatedRevocationRequest
-            memory revokeRequest = DelegatedRevocationRequest({
-                schema: inviteSchema,
-                data: RevocationRequestData({uid: uid, value: 0}),
-                signature: EIP712Signature(0, 0, 0),
-                revoker: alice
-            });
-        revokeRequest = signDelegatedRevocationRequest(revokeRequest, 1);
-        vm.startPrank(alice);
-        vault.revokeWithReason(
-            revokeRequest,
-            "Revoking Bobs invitation to test the contract."
-        );
-        vm.stopPrank();
+        RevocationRequest memory revokeRequest = RevocationRequest({
+            schema: inviteSchema,
+            data: RevocationRequestData({uid: uid, value: 0})
+        });
+        AttestationRequest memory revokeReason = AttestationRequest({
+            schema: revokeReasonSchema,
+            data: AttestationRequestData({
+                recipient: address(0),
+                expirationTime: 0,
+                revocable: false,
+                refUID: revokeRequest.data.uid,
+                data: abi.encode(
+                    "Revoking Bobs invitation to test the contract."
+                ),
+                value: 0
+            })
+        });
+        vm.prank(alice);
+        eas.attest(revokeReason);
+        vm.prank(alice);
+        eas.revoke(revokeRequest);
         require(
             !vault.isInvited(pool, bob),
             "Bob is invited after invitation was revoked."
@@ -217,17 +219,25 @@ contract VaultTest is Test {
         vm.stopPrank();
         require(vault.isBlocked(pool, bob), "Bob should be blocked.");
 
-        DelegatedRevocationRequest
-            memory revokeRequest = DelegatedRevocationRequest({
-                schema: blockSchema,
-                data: RevocationRequestData({uid: uid, value: 0}),
-                signature: EIP712Signature(0, 0, 0),
-                revoker: alice
-            });
-        revokeRequest = signDelegatedRevocationRequest(revokeRequest, 1);
-        vm.startPrank(alice);
-        vault.revokeWithReason(revokeRequest, "Unblocking Bob.");
-        vm.stopPrank();
+        RevocationRequest memory revokeRequest = RevocationRequest({
+            schema: blockSchema,
+            data: RevocationRequestData({uid: uid, value: 0})
+        });
+        AttestationRequest memory revokeReason = AttestationRequest({
+            schema: revokeReasonSchema,
+            data: AttestationRequestData({
+                recipient: address(0),
+                expirationTime: 0,
+                revocable: false,
+                refUID: revokeRequest.data.uid,
+                data: abi.encode("Unblocking Bob."),
+                value: 0
+            })
+        });
+        vm.prank(alice);
+        eas.attest(revokeReason);
+        vm.prank(alice);
+        eas.revoke(revokeRequest);
         require(!vault.isBlocked(pool, bob), "Bob should be unblocked.");
     }
 
@@ -346,22 +356,29 @@ contract VaultTest is Test {
                 value: 0
             })
         });
-        vm.startPrank(alice);
+        vm.prank(alice);
         bytes32 uid = eas.attest(request);
-        vm.stopPrank();
         require(vault.isBlocked(pool, alice), "Alice should be blocked");
 
-        DelegatedRevocationRequest
-            memory revokeRequest = DelegatedRevocationRequest({
-                schema: inviteSchema,
-                data: RevocationRequestData({uid: uid, value: 0}),
-                signature: EIP712Signature(0, 0, 0),
-                revoker: alice
-            });
-        revokeRequest = signDelegatedRevocationRequest(revokeRequest, 1);
+        RevocationRequest memory revokeRequest = RevocationRequest({
+            schema: blockSchema,
+            data: RevocationRequestData({uid: uid, value: 0})
+        });
+        AttestationRequest memory revokeReason = AttestationRequest({
+            schema: revokeReasonSchema,
+            data: AttestationRequestData({
+                recipient: address(0),
+                expirationTime: 0,
+                revocable: false,
+                refUID: revokeRequest.data.uid,
+                data: abi.encode("Revoking blocking myself."),
+                value: 0
+            })
+        });
         vm.startPrank(alice);
+        eas.attest(revokeReason);
         vm.expectRevert();
-        vault.revokeWithReason(revokeRequest, "Revoking blocking myself.");
+        eas.revoke(revokeRequest);
         vm.stopPrank();
     }
 
